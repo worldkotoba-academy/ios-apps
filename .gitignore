@@ -1,0 +1,14 @@
+.DS_Store
+xcuserdata/
+build/
+
+# 教材データの平文（暗号化した content.enc だけを登録する）
+apps/*/*/*_data.json
+apps/*/*/Assets.xcassets/*.imageset/
+
+# 署名・鍵
+*.p12
+*.p8
+*.mobileprovision
+*.ipa
+*.hex

@@ -1,0 +1,193 @@
+name: iOS Build
+
+# 公開リポジトリなので GitHub Actions は無料・時間制限なし（標準ランナー）。
+# 教材データは apps/<Target>/content.enc に暗号化してあり、ビルドの直前にだけ復号する。
+#
+# mode=check  … 署名なしでコンパイルだけ通す（QC用）
+# mode=upload … 手動署名でアーカイブして App Store Connect へアップロード
+#
+# 必要な Secrets
+#   CONTENT_KEY                         教材データの復号鍵（64桁の16進）
+#   IOS_DIST_P12_BASE64 / IOS_DIST_P12_PASSWORD / APPLE_TEAM_ID
+#   APP_STORE_CONNECT_API_KEY_ID / APP_STORE_CONNECT_API_ISSUER_ID / APP_STORE_CONNECT_API_KEY
+#   IOS_PROFILE_<TARGET を大文字にしたもの>   配布プロファイル（base64）例: IOS_PROFILE_ESVOCAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'ビルド対象（カンマ区切り。例: EsVocab,PtA1）'
+        required: true
+      mode:
+        description: 'check または upload'
+        required: false
+        default: 'check'
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.s.outputs.list }}
+    steps:
+      - id: s
+        env:
+          IN: ${{ github.event.inputs.targets }}
+        run: |
+          python3 - <<'PY' >> $GITHUB_OUTPUT
+          import json, os, re
+          ts = [x.strip() for x in os.environ["IN"].split(",") if x.strip()]
+          assert ts and all(re.fullmatch(r"[A-Za-z0-9]+", t) for t in ts), ts
+          print("list=" + json.dumps([{"target": t, "key": t.upper()} for t in ts]))
+          PY
+
+  build:
+    needs: matrix
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.matrix.outputs.list) }}
+    env:
+      MODE: ${{ github.event.inputs.mode || 'check' }}
+      TARGET: ${{ matrix.app.target }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unseal content
+        env:
+          CONTENT_KEY: ${{ secrets.CONTENT_KEY }}
+        run: bash tools/unseal.sh "apps/$TARGET"
+
+      - name: Select Xcode 26 whose iOS SDK is App-Store-accepted
+        run: |
+          pick_xcode() {
+            for candidate in $1; do
+              [ -d "$candidate" ] || continue
+              if DEVELOPER_DIR="$candidate/Contents/Developer" xcodebuild -showsdks 2>/dev/null | grep -qi "iphoneos"; then
+                echo "$candidate"; return 0
+              fi
+            done
+            return 1
+          }
+          XCODE_PATH=""
+          for mm in 26.4 26.3 26.2 26.1 26.0; do
+            cands=$(ls -d /Applications/Xcode_${mm}*.app 2>/dev/null | grep -v beta | sort -Vr)
+            if [ -n "$cands" ]; then
+              picked=$(pick_xcode "$cands" || true)
+              [ -n "$picked" ] && { XCODE_PATH="$picked"; break; }
+            fi
+          done
+          [ -n "$XCODE_PATH" ] || XCODE_PATH=$(pick_xcode "$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -v beta | sort -Vr)" || echo /Applications/Xcode.app)
+          sudo xcode-select -switch "$XCODE_PATH/Contents/Developer"
+          echo "DEVELOPER_DIR=$XCODE_PATH/Contents/Developer" >> $GITHUB_ENV
+          xcodebuild -version && xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Download iOS platform if missing
+        run: |
+          sudo xcodebuild -runFirstLaunch || true
+          xcodebuild -showsdks | grep -i iphone || sudo xcodebuild -downloadPlatform iOS || true
+
+      - name: Compile check (no signing)
+        if: env.MODE == 'check'
+        working-directory: apps/${{ matrix.app.target }}
+        run: |
+          xcodebuild -project "$TARGET.xcodeproj" -scheme "$TARGET" \
+            -configuration Release -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tail -60
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: Bump build number
+        if: env.MODE == 'upload'
+        working-directory: apps/${{ matrix.app.target }}
+        run: |
+          # 旧リポジトリでの番号（最大4）より必ず大きくするため 100 を足す
+          sed -i '' "s/CURRENT_PROJECT_VERSION = .*/CURRENT_PROJECT_VERSION = $((100 + GITHUB_RUN_NUMBER));/" "$TARGET.xcodeproj/project.pbxproj"
+
+      - name: Import iOS Distribution Certificate
+        if: env.MODE == 'upload'
+        env:
+          P12_BASE64: ${{ secrets.IOS_DIST_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain; KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          echo -n "$P12_BASE64" | base64 -D > $RUNNER_TEMP/cert.p12
+          security import $RUNNER_TEMP/cert.p12 -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Import Provisioning Profile
+        if: env.MODE == 'upload'
+        id: profile
+        env:
+          B64: ${{ secrets[format('IOS_PROFILE_{0}', matrix.app.key)] }}
+        run: |
+          [ -n "$B64" ] || { echo "::error::Secret IOS_PROFILE_${{ matrix.app.key }} がありません"; exit 1; }
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"; mkdir -p "$PROFILE_DIR"
+          printf '%s' "$B64" | base64 -D > "$PROFILE_DIR/$TARGET.mobileprovision"
+          PLIST=$(security cms -D -i "$PROFILE_DIR/$TARGET.mobileprovision")
+          NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" /dev/stdin <<< "$PLIST")
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+
+      - name: Write ASC API key
+        if: env.MODE == 'upload'
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          mkdir -p ~/private_keys ~/.appstoreconnect/private_keys
+          printf '%s' "$KEY" > ~/private_keys/AuthKey_$KEY_ID.p8
+          cp ~/private_keys/AuthKey_$KEY_ID.p8 ~/.appstoreconnect/private_keys/
+          echo "AUTHKEY=$HOME/private_keys/AuthKey_$KEY_ID.p8" >> $GITHUB_ENV
+
+      - name: Build & Archive (manual signing)
+        if: env.MODE == 'upload'
+        working-directory: apps/${{ matrix.app.target }}
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          PROFILE_NAME: ${{ steps.profile.outputs.name }}
+        run: |
+          BUNDLE_ID=$(grep -m1 'PRODUCT_BUNDLE_IDENTIFIER = ' "$TARGET.xcodeproj/project.pbxproj" | sed 's/.*= //; s/;//')
+          mkdir -p build
+          cat > build/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>uploadSymbols</key><true/>
+            <key>destination</key><string>export</string>
+            <key>provisioningProfiles</key><dict><key>$BUNDLE_ID</key><string>$PROFILE_NAME</string></dict>
+          </dict></plist>
+          EOF
+          AUTH=(-authenticationKeyPath "$AUTHKEY" -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER_ID")
+          xcodebuild -project "$TARGET.xcodeproj" -scheme "$TARGET" -configuration Release \
+            -archivePath build/app.xcarchive -destination 'generic/platform=iOS' "${AUTH[@]}" \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" DEVELOPMENT_TEAM="$TEAM_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" archive
+          xcodebuild -exportArchive -archivePath build/app.xcarchive -exportOptionsPlist build/ExportOptions.plist \
+            -exportPath build/export "${AUTH[@]}"
+
+      - name: Upload .ipa to App Store Connect
+        if: env.MODE == 'upload'
+        working-directory: apps/${{ matrix.app.target }}
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          xcrun altool --upload-app --type ios --file "$(ls build/export/*.ipa)" --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID"
+
+      # .ipa は保存しない（公開リポジトリの保存ファイルは誰でもダウンロードできるため）。
+      # アップロードしたビルドは App Store Connect に残る。
