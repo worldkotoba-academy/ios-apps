@@ -12,6 +12,26 @@ struct StudyView: View {
     @State private var typed: [String: String] = [:]
     @State private var revealed: Set<String> = []
 
+    /// 開いたときの状態（ストア用スクリーンショットの撮影モードだけが使う。通常は nil）
+    struct Start {
+        var section = 0, page = 0
+        var selections: [String: Set<Int>] = [:]
+        var typed: [String: String] = [:]
+        var revealed: Set<String> = []
+    }
+
+    init(level: ExamLevel, round: ExamRound, start: Start? = nil) {
+        self.level = level
+        self.round = round
+        if let s = start {
+            _sectionIndex = State(initialValue: s.section)
+            _page = State(initialValue: s.page)
+            _selections = State(initialValue: s.selections)
+            _typed = State(initialValue: s.typed)
+            _revealed = State(initialValue: s.revealed)
+        }
+    }
+
     private var section: ExamSection { round.sections[sectionIndex] }
 
     var body: some View {

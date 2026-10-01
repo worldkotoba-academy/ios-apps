@@ -1,0 +1,118 @@
+name: iOS Screenshots
+
+# ストア用スクリーンショットをシミュレータで撮る（実際のアプリの画面）。
+# Debug ビルドだけにある撮影モード（AppMain.swift の ScreenshotScene）を環境変数 SHOT で開いて撮影する。
+# 撮った PNG は数日だけ artifact に置く（ストアで公開する画面なので公開して差し支えない）。.ipa は作らない。
+#
+# plan … 手元の _exam_app_kit/real_shots.py plan が出す JSON  {"<Target>": ["home", "round", "study:0:0:1", ...]}
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: '撮影対象（カンマ区切り。例: ZhL3,EsC2）'
+        required: true
+      plan:
+        description: '撮影計画（JSON）'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.s.outputs.list }}
+    steps:
+      - id: s
+        env:
+          IN: ${{ github.event.inputs.targets }}
+          PLAN: ${{ github.event.inputs.plan }}
+        run: |
+          python3 - <<'PY' >> $GITHUB_OUTPUT
+          import json, os, re
+          ts = [x.strip() for x in os.environ["IN"].split(",") if x.strip()]
+          plan = json.loads(os.environ["PLAN"])
+          assert ts and all(re.fullmatch(r"[A-Za-z0-9]+", t) for t in ts), ts
+          for t in ts:
+              assert all(re.fullmatch(r"[a-z]+(:[0-9,]*)*", s) for s in plan[t]), plan[t]
+          print("list=" + json.dumps([{"target": t, "scenes": " ".join(plan[t])} for t in ts]))
+          PY
+
+  shots:
+    needs: matrix
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.matrix.outputs.list) }}
+    env:
+      TARGET: ${{ matrix.app.target }}
+      SCENES: ${{ matrix.app.scenes }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unseal content
+        env:
+          CONTENT_KEY: ${{ secrets.CONTENT_KEY }}
+        run: bash tools/unseal.sh "apps/$TARGET"
+
+      - name: Select Xcode 26
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -v beta | sort -Vr | head -1)
+          [ -n "$XCODE_PATH" ] || XCODE_PATH=/Applications/Xcode.app
+          sudo xcode-select -switch "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      - name: Build for simulator (Debug)
+        working-directory: apps/${{ matrix.app.target }}
+        run: |
+          xcodebuild -project "$TARGET.xcodeproj" -scheme "$TARGET" -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO build | tail -30
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: Shoot
+        run: |
+          set -euo pipefail
+          APP=$(ls -d "$RUNNER_TEMP"/dd/Build/Products/Debug-iphonesimulator/*.app | head -1)
+          BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
+          RT=$(xcrun simctl list runtimes -j | python3 -c "import json,sys; r=[x for x in json.load(sys.stdin)['runtimes'] if x['platform']=='iOS' and x['isAvailable']]; print(sorted(r, key=lambda x: [int(p) for p in x['version'].split('.')])[-1]['identifier'])")
+          pick() {  # 名前に $1 を含む最新の機種
+            xcrun simctl list devicetypes -j | python3 -c "import json,sys; d=[x for x in json.load(sys.stdin)['devicetypes'] if '$1' in x['name']]; print(d[-1]['identifier'])"
+          }
+          mkdir -p shots
+          for dev in "iphone:iPhone 17 Pro Max" "ipad:iPad Pro 13-inch"; do
+            kind=${dev%%:*}; name=${dev#*:}
+            DT=$(pick "$name" || pick "${name%% *}")
+            U=$(xcrun simctl create "shot-$kind" "$DT" "$RT")
+            echo "$kind: $DT on $RT → $U"
+            xcrun simctl boot "$U"; xcrun simctl bootstatus "$U" -b
+            xcrun simctl ui "$U" appearance light
+            xcrun simctl status_bar "$U" override --time 9:41 --dataNetwork wifi --wifiMode active --wifiBars 3 \
+              --cellularMode active --cellularBars 4 --batteryState charged --batteryLevel 100
+            xcrun simctl install "$U" "$APP"
+            i=0
+            for scene in $SCENES; do
+              i=$((i+1))
+              xcrun simctl terminate "$U" "$BID" 2>/dev/null || true
+              SIMCTL_CHILD_SHOT="$scene" xcrun simctl launch "$U" "$BID" -AppleLanguages "(ja)" -AppleLocale ja_JP
+              sleep 8
+              xcrun simctl io "$U" screenshot "shots/$kind-$i.png"
+              echo "  $kind-$i  $scene"
+            done
+            xcrun simctl shutdown "$U"
+          done
+          ls -l shots
+
+      - name: Save screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: shots-${{ matrix.app.target }}
+          path: shots/*.png
+          retention-days: 3

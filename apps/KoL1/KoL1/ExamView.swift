@@ -18,6 +18,26 @@ struct ExamView: View {
     @State private var record: ExamRecord? = nil
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    /// 解答の途中から始める（ストア用スクリーンショットの撮影モードだけが使う。通常は nil）
+    struct Start {
+        var section = 0
+        var selections: [String: Set<Int>] = [:]
+        var typed: [String: String] = [:]
+        var remaining = 0
+    }
+
+    init(level: ExamLevel, round: ExamRound, start: Start? = nil) {
+        self.level = level
+        self.round = round
+        if let s = start {
+            _phase = State(initialValue: .exam)
+            _sectionIndex = State(initialValue: s.section)
+            _selections = State(initialValue: s.selections)
+            _typed = State(initialValue: s.typed)
+            _remaining = State(initialValue: s.remaining)
+        }
+    }
     private var section: ExamSection { round.sections[sectionIndex] }
 
     private var answeredCount: Int {
