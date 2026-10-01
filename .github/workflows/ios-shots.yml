@@ -100,11 +100,19 @@ jobs:
             i=0
             for scene in $SCENES; do
               i=$((i+1))
-              xcrun simctl terminate "$U" "$BID" 2>/dev/null || true
-              SIMCTL_CHILD_SHOT="$scene" xcrun simctl launch "$U" "$BID" -AppleLanguages "(ja)" -AppleLocale ja_JP
-              sleep 8
-              xcrun simctl io "$U" screenshot "shots/$kind-$i.png"
-              echo "  $kind-$i  $scene"
+              # 描画前の真っ白な画面（150KB 未満）を撮ったら、待つ・起動し直すを繰り返す
+              for try in 1 2 3 4; do
+                if [ $try -eq 1 ] || [ $try -eq 3 ]; then
+                  xcrun simctl terminate "$U" "$BID" 2>/dev/null || true
+                  SIMCTL_CHILD_SHOT="$scene" xcrun simctl launch "$U" "$BID" -AppleLanguages "(ja)" -AppleLocale ja_JP
+                fi
+                sleep 8
+                xcrun simctl io "$U" screenshot "shots/$kind-$i.png"
+                size=$(stat -f%z "shots/$kind-$i.png")
+                [ "$size" -ge 150000 ] && break
+                echo "  $kind-$i: 白い画面（$size B）→ 撮り直し"
+              done
+              echo "  $kind-$i  $scene  $size B"
             done
             xcrun simctl shutdown "$U"
           done
