@@ -22,7 +22,8 @@ struct ExamMockApp: App {
 #if DEBUG
 // MARK: - ストア用スクリーンショットの撮影モード（Debug ビルドだけ・製品版には入らない）
 // 起動時の環境変数 SHOT で開く画面を指定する。CI（ios-shots.yml）がシミュレータで起動して撮影する。
-//   home / round / study:<大問>:<設問>:<選んだ番号,…> / exam:<大問>:<残り秒>:<解答済み数> / result
+//   home / round / study:<大問>:<設問>:<選んだ番号,…>[:1] / exam:<大問>:<残り秒>:<解答済み数>[:1] / result
+//   （末尾の :1 は本文を畳んだ状態で開く）
 
 struct ScreenshotScene {
     let parts: [String]
@@ -30,7 +31,9 @@ struct ScreenshotScene {
     static let current: ScreenshotScene? = {
         guard let s = ProcessInfo.processInfo.environment["SHOT"], !s.isEmpty else { return nil }
         seedRecords()
-        return ScreenshotScene(parts: s.components(separatedBy: ":"))
+        let parts = s.components(separatedBy: ":")
+        if parts.count > 4, parts[4] == "1" { ContextCard.startExpanded = false }   // 長い本文は畳んで設問を見せる
+        return ScreenshotScene(parts: parts)
     }()
 
     private static var level: ExamLevel { ExamData.level }
@@ -124,7 +127,7 @@ struct ScreenshotScene {
         let rounds = level.rounds
         let (all, allTyped) = answers(rounds[0], upTo: Int.max)
         RecordStore.shared.add(record(rounds[0], all, allTyped, date: day(1, 21, 14)))
-        let (part, partTyped) = answers(rounds[0], upTo: rounds[0].questionCount * 9 / 10)
+        let (part, partTyped) = answers(rounds[0], upTo: rounds[0].questionCount * 2 / 3)
         RecordStore.shared.add(record(rounds[0], part, partTyped, date: day(6, 20, 2)))
         if rounds.count > 1 {
             let (a2, t2) = answers(rounds[1], upTo: Int.max)

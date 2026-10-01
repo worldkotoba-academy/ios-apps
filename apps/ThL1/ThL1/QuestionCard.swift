@@ -4,7 +4,9 @@ import SwiftUI
 
 struct ContextCard: View {
     let section: ExamSection
-    @State private var expanded = true
+    @State private var expanded = ContextCard.startExpanded
+    /// 本文を開いた状態で表示するか（ストア用スクリーンショットの撮影モードだけが false にする）
+    static var startExpanded = true
     @State private var showTranslation = false
 
     var body: some View {
