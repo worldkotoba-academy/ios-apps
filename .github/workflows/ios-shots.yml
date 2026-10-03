@@ -36,7 +36,7 @@ jobs:
           plan = json.loads(os.environ["PLAN"])
           assert ts and all(re.fullmatch(r"[A-Za-z0-9]+", t) for t in ts), ts
           for t in ts:
-              assert all(re.fullmatch(r"[a-z]+(:[0-9,]*)*", s) for s in plan[t]), plan[t]
+              assert all(re.fullmatch(r"[a-z]+(:[0-9a-z,]*)*", s) for s in plan[t]), plan[t]
           print("list=" + json.dumps([{"target": t, "scenes": " ".join(plan[t])} for t in ts]))
           PY
 
