@@ -200,7 +200,7 @@ struct RoundCard: View {
                 } else if round.round <= FREE_ROUNDS && !StoreManager.shared.isPurchased(level) {
                     Text("無料でお試しいただけます").font(.caption2.weight(.semibold)).foregroundColor(.exAccent)
                 }
-                if let best = store.best(levelKey: level.key, round: round.round) {
+                if !locked, let best = store.best(levelKey: level.key, round: round.round) {
                     Text("最高 \(best.total)/\(best.totalMax)点　\(best.reached ? "目安に到達" : "あと\(max(0, round.passing - best.total))点")")
                         .font(.caption2.weight(.semibold))
                         .foregroundColor(best.reached ? .green : .exRed)
