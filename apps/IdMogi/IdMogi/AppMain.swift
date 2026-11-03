@@ -38,7 +38,9 @@ struct ScreenshotScene {
             levelIndex = min(max(Int(parts[1]) ?? 0, 0), ExamData.levels.count - 1)
             parts.removeFirst(2)
         }
-        MainActor.assumeIsolated { StoreManager.shared.screenshotUnlocked = [level.key] }
+        // 級のホーム（level）は未購入の状態（鍵と購入ボタン）を見せる。ほかは見せる級を購入済みにする
+        let unlocked: Set<String> = parts.first == "level" ? [] : [level.key]
+        MainActor.assumeIsolated { StoreManager.shared.screenshotUnlocked = unlocked }
         seedRecords()
         if parts.count > 4, parts[4] == "1" { ContextCard.startExpanded = false }   // 長い本文は畳んで設問を見せる
         return ScreenshotScene(parts: parts)
