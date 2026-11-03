@@ -26,7 +26,7 @@ final class StoreManager: ObservableObject {
 
     private init() {
         updates = Task { [weak self] in
-            for await result in Transaction.updates {
+            for await result in StoreKit.Transaction.updates {
                 await self?.handle(result)
             }
         }
@@ -72,7 +72,7 @@ final class StoreManager: ObservableObject {
 
     func refresh() async {
         var s: Set<String> = []
-        for await r in Transaction.currentEntitlements {
+        for await r in StoreKit.Transaction.currentEntitlements {
             if case .verified(let t) = r, t.revocationDate == nil, let k = key(for: t.productID) {
                 s.insert(k)
             }
@@ -84,7 +84,7 @@ final class StoreManager: ObservableObject {
         PRODUCT_IDS.first { $0.value == productID }?.key
     }
 
-    private func handle(_ result: VerificationResult<Transaction>) async {
+    private func handle(_ result: VerificationResult<StoreKit.Transaction>) async {
         guard case .verified(let t) = result else { return }
         if let k = key(for: t.productID) {
             if t.revocationDate == nil { purchased.insert(k) } else { purchased.remove(k) }
